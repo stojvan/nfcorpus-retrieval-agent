@@ -1,0 +1,10 @@
+{
+  "participants": {
+    "retrieval_agent": "http://purple-agent:9010"
+  },
+  "config": {
+    "num_queries": 100,
+    "top_k": 5,
+    "random_seed": 42
+  }
+}

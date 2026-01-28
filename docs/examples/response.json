@@ -1,0 +1,27 @@
+{
+  "summary": {
+    "total_queries": 100,
+    "mean_ndcg_at_5": 0.456,
+    "median_ndcg_at_5": 0.423,
+    "std_ndcg_at_5": 0.123,
+    "min_ndcg_at_5": 0.0,
+    "max_ndcg_at_5": 1.0,
+    "success_rate": 0.87
+  },
+  "per_query_results": [
+    {
+      "query_id": "PLAIN-123",
+      "query_text": "What are the effects of calcium on bone health?",
+      "retrieved_docs": ["MED-123", "MED-456", "MED-789", "MED-234", "MED-567"],
+      "ndcg_at_5": 0.678,
+      "relevant_docs_retrieved": 3,
+      "total_relevant_docs": 5
+    }
+  ],
+  "config": {
+    "num_queries": 100,
+    "top_k": 5,
+    "random_seed": 42
+  },
+  "random_seed_used": 42
+}

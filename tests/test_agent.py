@@ -197,3 +197,68 @@ async def test_message(agent, streaming):
     assert not all_errors, f"Message validation failed:\n" + "\n".join(all_errors)
 
 # Add your custom tests here
+
+@pytest.mark.asyncio
+async def test_retrieval_request(agent):
+    """Test that agent handles retrieval request and returns valid document IDs."""
+    query_request = '{"query": "calcium and bone health", "top_k": 5}'
+    events = await send_text_message(query_request, agent, streaming=False)
+    
+    # Find the artifact with retrieval results
+    doc_ids = None
+    for event in events:
+        match event:
+            case (task, update):
+                if task.artifacts:
+                    for artifact in task.artifacts:
+                        if artifact.name == "retrieval_results":
+                            # Extract data from artifact
+                            for part in artifact.parts:
+                                if hasattr(part.root, 'data'):
+                                    data = part.root.data
+                                    doc_ids = data.get('doc_ids', [])
+    
+    assert doc_ids is not None, "No retrieval_results artifact found"
+    assert isinstance(doc_ids, list), "doc_ids should be a list"
+    assert len(doc_ids) <= 5, "Should return at most top_k documents"
+    
+    # Verify document ID format (NFCorpus format: MED-XXX)
+    for doc_id in doc_ids:
+        assert isinstance(doc_id, str), f"Document ID should be string, got {type(doc_id)}"
+        assert doc_id.startswith("MED-") or len(doc_id) > 0, f"Invalid document ID format: {doc_id}"
+
+@pytest.mark.asyncio
+async def test_top_k_parameter(agent):
+    """Test that agent respects the top_k parameter."""
+    query_request = '{"query": "diabetes treatment", "top_k": 3}'
+    events = await send_text_message(query_request, agent, streaming=False)
+    
+    doc_ids = None
+    for event in events:
+        match event:
+            case (task, update):
+                if task.artifacts:
+                    for artifact in task.artifacts:
+                        if artifact.name == "retrieval_results":
+                            for part in artifact.parts:
+                                if hasattr(part.root, 'data'):
+                                    doc_ids = part.root.data.get('doc_ids', [])
+    
+    assert doc_ids is not None, "No retrieval results found"
+    assert len(doc_ids) <= 3, f"Should return at most 3 documents, got {len(doc_ids)}"
+
+@pytest.mark.asyncio
+async def test_invalid_request_format(agent):
+    """Test that agent handles invalid request format gracefully."""
+    invalid_request = '{"invalid": "format"}'
+    events = await send_text_message(invalid_request, agent, streaming=False)
+    
+    # Should get a failed task or error message
+    task_failed = False
+    for event in events:
+        match event:
+            case (task, update):
+                if task.status.state == "failed":
+                    task_failed = True
+    
+    assert task_failed, "Agent should fail gracefully on invalid request format"

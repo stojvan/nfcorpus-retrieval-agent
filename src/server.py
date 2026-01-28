@@ -16,28 +16,28 @@ from executor import Executor
 def main():
     parser = argparse.ArgumentParser(description="Run the A2A agent.")
     parser.add_argument("--host", type=str, default="127.0.0.1", help="Host to bind the server")
-    parser.add_argument("--port", type=int, default=9009, help="Port to bind the server")
+    parser.add_argument("--port", type=int, default=9010, help="Port to bind the server")
     parser.add_argument("--card-url", type=str, help="URL to advertise in the agent card")
     args = parser.parse_args()
 
-    # Fill in your agent card
-    # See: https://a2a-protocol.org/latest/tutorials/python/3-agent-skills-and-card/
-    
     skill = AgentSkill(
-        id="",
-        name="",
-        description="",
-        tags=[],
-        examples=[]
+        id="nfcorpus-retrieval",
+        name="NFCorpus Document Retrieval",
+        description="Retrieves relevant biomedical documents from NFCorpus dataset using LLM-powered search",
+        tags=["retrieval", "biomedical", "nfcorpus", "llm"],
+        examples=[
+            '{"query": "What are the effects of calcium on bone health?", "top_k": 5}',
+            '{"query": "diabetes treatment options", "top_k": 10}'
+        ]
     )
 
     agent_card = AgentCard(
-        name="",
-        description="",
+        name="NFCorpus Retrieval Agent",
+        description="LLM-powered agent that retrieves and ranks biomedical documents from the NFCorpus database",
         url=args.card_url or f"http://{args.host}:{args.port}/",
         version='1.0.0',
-        default_input_modes=['text'],
-        default_output_modes=['text'],
+        default_input_modes=['text', 'data'],
+        default_output_modes=['data'],
         capabilities=AgentCapabilities(streaming=True),
         skills=[skill]
     )
