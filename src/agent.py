@@ -1,132 +1,136 @@
 import os
-import json
-from typing import List
-from pydantic import BaseModel, Field
-from pydantic_ai import Agent as PydanticAgent, RunContext
+import logging
 import httpx
-
+from pydantic import BaseModel, ValidationError
+from pydantic_ai import Agent as PydanticAgent, RunContext
 from a2a.server.tasks import TaskUpdater
 from a2a.types import Message, TaskState, Part, DataPart
 from a2a.utils import get_message_text, new_agent_text_message
+from schemas import QueryRequest, RetrievalResponse
+
+logger = logging.getLogger(__name__)
+
+class MCPSearchResult(BaseModel):
+    """Result from MCP search_nfcorpus tool."""
+    doc_id: str
+    score: float
 
 
-class QueryRequest(BaseModel):
-    query: str = Field(description="Search query text")
-    top_k: int = Field(default=5, description="Number of documents to retrieve")
+class MCPSearchResponse(BaseModel):
+    """Response from MCP server."""
+    results: list[MCPSearchResult]
 
 
-class RetrievalResponse(BaseModel):
-    doc_ids: List[str] = Field(description="List of retrieved document IDs in ranked order")
-
-
-class DocumentRanking(BaseModel):
-    """Structured output for LLM agent - ranked list of document IDs."""
-    doc_ids: List[str] = Field(description="List of document IDs in ranked order (most relevant first)")
-
-
-class MCPDeps(BaseModel):
-    """Dependencies for MCP client access."""
+class AgentDeps(BaseModel):
+    """Dependencies for PydanticAI agent."""
     model_config = {"arbitrary_types_allowed": True}
     
-    mcp_url: str
+    mcp_server_url: str
     http_client: httpx.AsyncClient
-
-
-SYSTEM_PROMPT = """You are a biomedical document retrieval expert. Your task is to find the most relevant 
-documents from the NFCorpus database for a given query.
-
-You have access to a search tool that queries a vector database of biomedical articles.
-You can:
-1. Reformulate the query if needed for better results
-2. Make multiple searches with different query variations
-3. Analyze the returned documents and their relevance scores
-4. Decide on the final ranking of documents
-
-Your output must be a list of document IDs in ranked order (most relevant first).
-Return exactly the number of documents requested (top_k), or fewer if insufficient matches.
-Only return the document IDs as a JSON array, nothing else."""
 
 
 class Agent:
     def __init__(self):
-        self.mcp_url = os.getenv("MCP_SERVER_URL", "http://localhost:8000")
-        self.llm_model = os.getenv("LLM_MODEL", "openai:gpt-4.1")
+        self.api_key = os.getenv("OPENAI_API_KEY", "")
+        self.mcp_server_url = os.getenv("MCP_SERVER_URL", "http://green-agent:8000")
+        logger.info(f"Agent initialized with MCP_SERVER_URL: {self.mcp_server_url}")
         
-        self.llm_agent = PydanticAgent(
-            model=self.llm_model,
-            system_prompt=SYSTEM_PROMPT,
-            deps_type=MCPDeps,
-            output_type=DocumentRanking,
+        self.pydantic_agent = PydanticAgent(
+            "openai:gpt-4o",
+            deps_type=AgentDeps,
+            output_type=RetrievalResponse,
+            system_prompt="""You are an intelligent biomedical document retrieval agent.
+Your task is to analyze biomedical queries and retrieve the most relevant documents from the NFCorpus database.
+
+You have access to a vector search tool that can find documents based on semantic similarity.
+Use the search_nfcorpus tool to query the database with appropriate search terms.
+
+Analyze the query, decide on the best search strategy, and return the most relevant document IDs."""
         )
         
-        @self.llm_agent.tool
-        async def search_nfcorpus(ctx: RunContext[MCPDeps], query: str, top_k: int = 5) -> list[dict]:
-            """Search NFCorpus biomedical database for relevant documents.
+        @self.pydantic_agent.tool
+        async def search_nfcorpus(ctx: RunContext[AgentDeps], query: str, top_k: int = 5) -> dict:
+            """Search the NFCorpus database for relevant biomedical documents.
             
             Args:
-                query: Search query text
-                top_k: Number of documents to retrieve
+                ctx: Runtime context with dependencies
+                query: The search query for finding relevant documents
+                top_k: Number of top results to return (default: 5)
                 
             Returns:
-                List of documents with doc_id, score, title, and text
+                Dictionary with search results containing doc_ids and scores
             """
+            mcp_url = f"{ctx.deps.mcp_server_url}/search_nfcorpus"
+            logger.info(f"Calling MCP server at {mcp_url} with query='{query}', top_k={top_k}")
             try:
                 response = await ctx.deps.http_client.post(
-                    f"{ctx.deps.mcp_url}/search_nfcorpus",
-                    json={"query": query, "top_k": top_k},
+                    mcp_url,
+                    json={
+                        "query": query,
+                        "top_k": top_k
+                    },
                     timeout=30.0
                 )
                 response.raise_for_status()
                 data = response.json()
-                return data.get("results", [])
+                logger.info(f"MCP server response: {data}")
+                
+                mcp_response = MCPSearchResponse.model_validate(data)
+                
+                return {
+                    "results": [
+                        {"doc_id": r.doc_id, "score": r.score}
+                        for r in mcp_response.results
+                    ]
+                }
             except Exception as e:
-                raise RuntimeError(f"MCP search failed: {e}")
+                logger.error(f"MCP search failed: {str(e)}")
+                return {"error": f"MCP search failed: {str(e)}", "results": []}
 
     async def run(self, message: Message, updater: TaskUpdater) -> None:
-        """Execute LLM-powered document retrieval.
-
+        """Process biomedical query and return retrieved document IDs.
+        
         Args:
-            message: The incoming message containing QueryRequest
+            message: The incoming message containing a query request
             updater: Report progress and results
         """
+        input_text = get_message_text(message)
+        
         try:
-            input_text = get_message_text(message)
-            
-            await updater.update_status(
-                TaskState.working, 
-                new_agent_text_message("Parsing query request...")
+            query_request = QueryRequest.model_validate_json(input_text)
+        except ValidationError as e:
+            await updater.reject(new_agent_text_message(f"Invalid query format: {e}"))
+            return
+        
+        await updater.update_status(
+            TaskState.working, 
+            new_agent_text_message(f"Searching NFCorpus for: {query_request.query}")
+        )
+        
+        async with httpx.AsyncClient() as http_client:
+            deps = AgentDeps(
+                mcp_server_url=self.mcp_server_url,
+                http_client=http_client
             )
             
-            request = QueryRequest.model_validate_json(input_text)
-            
-            await updater.update_status(
-                TaskState.working,
-                new_agent_text_message(f"Searching for: {request.query}")
-            )
-            
-            async with httpx.AsyncClient() as http_client:
-                deps = MCPDeps(mcp_url=self.mcp_url, http_client=http_client)
-                
-                result = await self.llm_agent.run(
-                    f"Find the top {request.top_k} most relevant documents for this query: {request.query}",
+            try:
+                result = await self.pydantic_agent.run(
+                    f"Find the top {query_request.top_k} most relevant documents for this biomedical query: {query_request.query}",
                     deps=deps
                 )
                 
-                # Extract document IDs from structured output
-                doc_ids = result.output.doc_ids if result.output else []
+                retrieval_response = result.output
                 
-                response = RetrievalResponse(doc_ids=doc_ids[:request.top_k])
-            
-            await updater.add_artifact(
-                parts=[Part(root=DataPart(data=response.model_dump()))],
-                name="retrieval_results",
-            )
-            
-        except json.JSONDecodeError as e:
-            await updater.failed(
-                new_agent_text_message(f"Invalid request format: {e}")
-            )
-        except Exception as e:
-            await updater.failed(
-                new_agent_text_message(f"Retrieval failed: {e}")
-            )
+                await updater.add_artifact(
+                    parts=[
+                        Part(root=DataPart(data={
+                            "doc_ids": retrieval_response.doc_ids
+                        }))
+                    ],
+                    name="Retrieved Documents"
+                )
+                
+            except Exception as e:
+                await updater.reject(
+                    new_agent_text_message(f"Error during retrieval: {str(e)}")
+                )
